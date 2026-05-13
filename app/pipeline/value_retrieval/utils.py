@@ -16,108 +16,14 @@ from tenacity import(
 from openai import RateLimitError, APITimeoutError
 
 
-MAX_KEYWORDS_PER_ITEM = 8
-KEYWORD_EXTRACTION_MAX_TOKENS = 256
-KEYWORD_EXTRACTION_TEMPERATURE = 0.0
-LOW_VALUE_SINGLE_TOKEN_STOPWORDS = {
-    "a", "an", "and", "are", "as", "at", "be", "between", "by", "did", "do", "does",
-    "each", "for", "from", "how", "in", "into", "is", "it", "many", "most", "name",
-    "number", "of", "on", "or", "per", "show", "than", "that", "the", "their", "to",
-    "was", "what", "which", "who", "with", "year",
-}
-
-
-def _normalize_keyword(keyword: str) -> str:
-    return re.sub(r"\s+", " ", keyword).strip().strip("\"'")
-
-
-def _is_informative_keyword(keyword: str) -> bool:
-    if not keyword:
-        return False
-
-    if len(keyword) == 1 and not keyword.isdigit():
-        return False
-
-    if " " in keyword:
-        return True
-
-    lowered = keyword.lower()
-    if lowered in LOW_VALUE_SINGLE_TOKEN_STOPWORDS:
-        return False
-
-    if any(char.isdigit() for char in keyword):
-        return True
-
-    return len(keyword) >= 3
-
-
 def _post_process_keywords(keywords_list: List[str]) -> List[str]:
-    deduped_keywords: List[str] = []
-    seen_keywords = set()
-
+    processed_keywords = set()
     for keyword in keywords_list:
-        normalized_keyword = _normalize_keyword(str(keyword))
-        if not _is_informative_keyword(normalized_keyword):
-            continue
+        keyword = str(keyword).strip()
+        processed_keywords.add(keyword)
+        processed_keywords.update(keyword.split(" "))
+    return list(processed_keywords)
 
-        normalized_key = normalized_keyword.casefold()
-        if normalized_key in seen_keywords:
-            continue
-
-        seen_keywords.add(normalized_key)
-        deduped_keywords.append(normalized_keyword)
-
-        if len(deduped_keywords) >= MAX_KEYWORDS_PER_ITEM * 2:
-            break
-
-    phrase_token_sets = []
-    for keyword in deduped_keywords:
-        if " " in keyword:
-            phrase_token_sets.append({token.casefold() for token in keyword.split()})
-
-    processed_keywords: List[str] = []
-    for keyword in deduped_keywords:
-        if " " not in keyword:
-            lowered_keyword = keyword.casefold()
-            if any(lowered_keyword in token_set for token_set in phrase_token_sets):
-                continue
-        processed_keywords.append(keyword)
-        if len(processed_keywords) >= MAX_KEYWORDS_PER_ITEM:
-            break
-
-    return processed_keywords
-
-
-def _fallback_extract_keywords(question: str, evidence: str) -> List[str]:
-    fallback_keywords: List[str] = []
-    seen_keywords = set()
-    text = f"{question}\n{evidence}".strip()
-
-    def add_keyword(candidate: str) -> None:
-        normalized_keyword = _normalize_keyword(candidate)
-        if not _is_informative_keyword(normalized_keyword):
-            return
-        normalized_key = normalized_keyword.casefold()
-        if normalized_key in seen_keywords:
-            return
-        seen_keywords.add(normalized_key)
-        fallback_keywords.append(normalized_keyword)
-
-    for match in re.finditer(r"'([^']+)'|\"([^\"]+)\"", text):
-        add_keyword(next(group for group in match.groups() if group))
-
-    for match in re.finditer(r"\b\d{4}\b|\b\d+(?:\.\d+)?%?\b", text):
-        add_keyword(match.group(0))
-
-    for match in re.finditer(r"\b[A-Z][A-Za-z0-9&'.-]*(?:\s+[A-Z][A-Za-z0-9&'.-]*)*\b", text):
-        add_keyword(match.group(0))
-
-    for token in re.findall(r"[A-Za-z0-9][A-Za-z0-9&'.-]*", text):
-        add_keyword(token)
-        if len(fallback_keywords) >= MAX_KEYWORDS_PER_ITEM:
-            break
-
-    return fallback_keywords[:MAX_KEYWORDS_PER_ITEM]
 
 def _parse_keywords_response(response: str) -> Optional[List[str]]:
     """Parse keywords from LLM response."""
@@ -149,7 +55,7 @@ def extract_keywords(
     extractor: Optional[LLMExtractor] = None,
 ) -> tuple[List[str], Dict[str, int]]:
     prompt = PromptFactory.format_keywords_extraction_prompt(question, evidence)
-    
+
     if extractor is None:
         extractor = LLMExtractor() if extractor_max_retry is None else LLMExtractor(max_retry=extractor_max_retry)
     results, total_token_usage = extractor.extract_with_retry(
@@ -159,16 +65,16 @@ def extract_keywords(
         fix_end_token=fix_end_token,
         end_token="</result>",
         n=1,
-        max_tokens=KEYWORD_EXTRACTION_MAX_TOKENS,
-        temperature=KEYWORD_EXTRACTION_TEMPERATURE,
     )
-    
+
     if results:
-        keywords_list = _post_process_keywords(results[0])
+        keywords_list = results[0]
     else:
-        logger.warning("Failed to extract keywords from LLM response, using compact fallback extraction")
-        keywords_list = _post_process_keywords(_fallback_extract_keywords(question, evidence))
-    
+        logger.warning("Failed to extract keywords from LLM response, using default keywords splitting strategy")
+        keywords_list = question.split(" ") + evidence.split(" ")
+
+    keywords_list = _post_process_keywords(keywords_list)
+
     return keywords_list, total_token_usage
 
 
