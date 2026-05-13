@@ -2,7 +2,6 @@ from chromadb import PersistentClient
 from chromadb.utils.embedding_functions import SentenceTransformerEmbeddingFunction, OpenAIEmbeddingFunction
 from pathlib import Path
 import shutil
-from tqdm import tqdm
 from typing import List, Dict, Any
 from .qwen_embedding_function import QwenEmbeddingFunction
 from .local_index import get_local_index_path, write_local_index_column, write_local_index_manifest
@@ -124,6 +123,18 @@ def _resolve_local_embedding_device(embedding_device: str) -> str:
     return embedding_device
 
 
+def _get_progress_markers(total_steps: int) -> set[int]:
+    if total_steps <= 0:
+        return set()
+    return {
+        1,
+        max(1, total_steps // 4),
+        max(1, total_steps // 2),
+        max(1, (total_steps * 3) // 4),
+        total_steps,
+    }
+
+
 def _process_one_column(
     db_path: str, 
     table_name: str, 
@@ -163,8 +174,8 @@ def _process_one_column(
         stored_table_name = table_name.lower() if lower_meta_data else table_name
         stored_column_name = column_name.lower() if lower_meta_data else column_name
         
-        # Process in batches to stay under ChromaDB's batch size limit
-        for i in tqdm(range(0, len(value_examples), batch_size), desc=f"Adding batches for {column_name}", leave=False):
+        # Process in batches to stay under ChromaDB's batch size limit.
+        for i in range(0, len(value_examples), batch_size):
             batch_examples = value_examples[i:i + batch_size]
             batch_embeddings = embedding_function(batch_examples)
             if collection is not None:
@@ -250,25 +261,35 @@ def make_vector_db(
 
     failed = False
     local_index_entries = []
+    progress_markers = _get_progress_markers(len(all_column_tasks))
+    completed_columns = 0
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = []
+        future_to_column = {}
         for table_name, column_name, column_type in all_column_tasks:
-            futures.append(executor.submit(
+            future = executor.submit(
                 _process_one_column,
-                db_path, table_name, column_name, column_type, 
+                db_path, table_name, column_name, column_type,
                 max_value_length, batch_size, lower_meta_data, collection, db_id,
                 embedding_function, local_index_path,
-            ))
+            )
+            future_to_column[future] = (table_name, column_name)
         
-        for future in tqdm(as_completed(futures), total=len(futures), desc=f"Making vector database for {db_id}"):
+        for future in as_completed(future_to_column):
+            table_name, column_name = future_to_column[future]
             try:
                 local_index_entry = future.result()
                 if local_index_entry is not None:
                     local_index_entries.append(local_index_entry)
+                completed_columns += 1
+                if completed_columns in progress_markers:
+                    logger.info(
+                        f"Vector DB {db_id}: processed "
+                        f"{completed_columns}/{len(all_column_tasks)} text columns"
+                    )
             except Exception as e:
-                logger.error(f"Failed to process column: {e}")
+                logger.exception(f"Failed to process column {db_id}.{table_name}.{column_name}: {e}")
                 # Cancel all other pending tasks
-                for f in futures:
+                for f in future_to_column:
                     f.cancel()
                 failed = True
                 break

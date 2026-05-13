@@ -1,12 +1,10 @@
 import sys
 sys.path.append(".")
 from pathlib import Path
-import traceback
 import shutil
 from argparse import ArgumentParser
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
-from tqdm import tqdm
 
 from app.vector_db.vector_db import make_vector_db, get_embedding_function
 from app.dataset import load_dataset
@@ -115,8 +113,7 @@ def make_vector_db_for_db_path(db_path: str, vector_database_config, column_para
             return True
             
     except Exception as e:
-        logger.error(f"Failed to make vector database for {db_id}: {e}")
-        logger.error(traceback.format_exc())
+        logger.exception(f"Failed to make vector database for {db_id}: {e}")
         vector_db_path = Path(vector_database_config.store_root_path) / db_id
         if vector_db_path.exists():
             shutil.rmtree(vector_db_path)
@@ -150,14 +147,29 @@ def run_vector_db_creation(
             executor.submit(make_vector_db_for_db_path, db_path, vector_database_config, column_parallel): db_path
             for db_path in db_paths
         }
-        for future in tqdm(as_completed(futures), total=len(futures), desc="Creating vector databases"):
+        completed_databases = 0
+        succeeded_databases = 0
+        failed_databases = 0
+        for future in as_completed(futures):
             db_path = futures[future]
             try:
-                future.result()
+                if future.result():
+                    succeeded_databases += 1
+                else:
+                    failed_databases += 1
             except Exception as e:
-                logger.error(f"Unhandled exception for database {db_path}: {e}")
+                failed_databases += 1
+                logger.exception(f"Unhandled exception for database {db_path}: {e}")
+            completed_databases += 1
+            logger.info(
+                f"Vector DB progress: completed {completed_databases}/{len(futures)} databases "
+                f"(success={succeeded_databases}, failed={failed_databases})"
+            )
 
-    logger.info("All vector database creation tasks completed.")
+    logger.info(
+        "All vector database creation tasks completed: "
+        f"success={succeeded_databases}, failed={failed_databases}"
+    )
 
 
 if __name__ == "__main__":
