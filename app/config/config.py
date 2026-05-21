@@ -32,6 +32,7 @@ class LLMConfig(BaseModel):
     fix_end_token: bool = Field(default=False, description="Whether to fix the end token to the LLM response")
     reasoning_effort: Optional[Literal["low", "medium", "high"]] = Field(default=None, description="The reasoning effort for the model (only for reasoning models like o1, o3)")
     max_model_len: int = Field(default=128000, description="The maximum context length of the model")
+    extra_body: Dict[str, Any] = Field(default_factory=dict, description="Additional request body fields passed to the chat completion API")
 
 
 class DatasetConfig(BaseModel):

@@ -103,6 +103,8 @@ class LLM:
                 }
                 if self._config.reasoning_effort is not None:
                     request_params["reasoning_effort"] = self._config.reasoning_effort
+                if self._config.extra_body:
+                    request_params["extra_body"] = self._config.extra_body
                 request_params.update(kwargs)
                     
                 response = self._get_client().chat.completions.create(**request_params)
