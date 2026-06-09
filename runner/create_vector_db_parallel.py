@@ -96,6 +96,7 @@ def make_vector_db_for_db_path(db_path: str, vector_database_config, column_para
             db_path=db_path,
             vector_db_path=Path(vector_database_config.store_root_path) / db_id,
             max_value_length=vector_database_config.max_value_length,
+            max_values_per_column=vector_database_config.max_values_per_column,
             batch_size=vector_database_config.batch_size,
             column_parallel=_resolve_column_parallel(vector_database_config, column_parallel),
             lower_meta_data=vector_database_config.lower_meta_data,

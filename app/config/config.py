@@ -26,6 +26,9 @@ class LLMConfig(BaseModel):
     api_key: str = Field(..., description="The api key of the model service")
     max_tokens: int = Field(default=4096, description="The maximum number of tokens to generate per request")
     max_request_n: Optional[int] = Field(default=None, ge=1, description="The maximum number of choices (n) per request; None means no limit")
+    request_timeout: int = Field(default=300, ge=1, description="The timeout for each LLM request in seconds")
+    retry_attempts: int = Field(default=15, ge=1, description="The number of retry attempts for transient LLM request errors")
+    retry_max_wait: int = Field(default=60, ge=0, description="The maximum exponential backoff wait between LLM retries in seconds")
     temperature: float = Field(default=0.7, description="The temperature of the model")
     api_type: Literal["openai", "azure"] = Field(default="openai", description="The type of the api")
     api_version: Optional[str] = Field(default=None, description="The version of the Azure API")
@@ -83,6 +86,7 @@ class VectorDatabaseConfig(BaseModel):
     store_root_path: str = Field(default=_path_to_str(WORKSPACE_ROOT / "vector_store"), description="The root path of the vector database")
     embedding_device: str = Field(default="auto", description="Execution device for local embedding models, e.g. auto, cpu, cuda, cuda:0")
     max_value_length: int = Field(default=100, description="The maximum length of the value")
+    max_values_per_column: Optional[int] = Field(default=None, description="Optional cap on distinct values embedded per text column")
     batch_size: int = Field(default=1024, description="The batch size for adding documents to the vector database")
     db_parallel: int = Field(default=1, ge=1, description="The number of databases to process in parallel")
     column_parallel: int = Field(default=1, ge=1, description="The number of columns to scan in parallel within a single database")
@@ -208,6 +212,9 @@ class Config:
                 "api_key": llm_config.get("api_key"),
                 "max_tokens": llm_config.get("max_tokens", 4096),
                 "max_request_n": llm_config.get("max_request_n", None),
+                "request_timeout": llm_config.get("request_timeout", 300),
+                "retry_attempts": llm_config.get("retry_attempts", 15),
+                "retry_max_wait": llm_config.get("retry_max_wait", 60),
                 "temperature": llm_config.get("temperature", 0.7),
                 "api_type": llm_config.get("api_type", "openai"),
                 "api_version": llm_config.get("api_version", None),
@@ -244,6 +251,7 @@ class Config:
             "base_url": vector_database_config.get("base_url", None),
             "api_key": vector_database_config.get("api_key", None),
             "max_value_length": vector_database_config.get("max_value_length", 100),
+            "max_values_per_column": vector_database_config.get("max_values_per_column", None),
             "batch_size": vector_database_config.get("batch_size", 1024),
             "db_parallel": vector_database_config.get("db_parallel", 1),
             "column_parallel": vector_database_config.get("column_parallel", 1),

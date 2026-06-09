@@ -141,6 +141,7 @@ def _process_one_column(
     column_name: str, 
     column_type: str, 
     max_value_length: int, 
+    max_values_per_column: int | None,
     batch_size: int, 
     lower_meta_data: bool, 
     collection: Any | None, 
@@ -151,10 +152,16 @@ def _process_one_column(
     if not _is_text_column_type(column_type):
         return None
     
+    limit_clause = (
+        f"LIMIT {max_values_per_column}"
+        if max_values_per_column is not None and max_values_per_column > 0
+        else ""
+    )
     query_sql = f"""
     SELECT DISTINCT `{column_name}` FROM `{table_name}` 
     WHERE `{column_name}` IS NOT NULL 
-    AND LENGTH(CAST(`{column_name}` AS TEXT)) <= {max_value_length};
+    AND LENGTH(CAST(`{column_name}` AS TEXT)) <= {max_value_length}
+    {limit_clause};
     """
     # Keep vector DB scans bounded so large/slow SQLite tables do not stall the pipeline indefinitely.
     # These full-column scans are one-shot ingestion work; bypass the shared SQL cache
@@ -210,6 +217,7 @@ def make_vector_db(
     db_path: str,
     vector_db_path: str,
     max_value_length: int = 100,
+    max_values_per_column: int | None = None,
     batch_size: int = 1024,
     column_parallel: int = 1,
     lower_meta_data=True,
@@ -269,7 +277,7 @@ def make_vector_db(
             future = executor.submit(
                 _process_one_column,
                 db_path, table_name, column_name, column_type,
-                max_value_length, batch_size, lower_meta_data, collection, db_id,
+                max_value_length, max_values_per_column, batch_size, lower_meta_data, collection, db_id,
                 embedding_function, local_index_path,
             )
             future_to_column[future] = (table_name, column_name)

@@ -3,7 +3,7 @@ from __future__ import annotations
 import threading
 from typing import TYPE_CHECKING, Dict, List, Optional
 from tenacity import(
-    retry,
+    Retrying,
     retry_if_exception_type,
     stop_after_attempt,
     wait_random_exponential
@@ -64,19 +64,14 @@ class LLM:
                     logger.debug(f"Created LLM client for model={self._config.model}")
         return self._client
         
-    @retry(
-        wait=wait_random_exponential(multiplier=1, max=60),
-        stop=stop_after_attempt(15),
-        # Retry on recoverable errors (including BadRequestError for provider-specific issues like "user location not supported")
-        # NOT on AuthenticationError (wrong API key won't fix itself)
-        retry=retry_if_exception_type((RateLimitError, APITimeoutError, APIConnectionError, InternalServerError, BadRequestError, EmptyResponseError))
-    )
     def ask(self, messages: List[Dict[str, str]],
                   system_message: Optional[Dict[str, str]] = None,
-                  timeout: int = 300,
+                  timeout: Optional[int] = None,
                   **kwargs) -> tuple[List[ChatCompletionMessage], Dict[str, int]]:
         if system_message:
             messages = [system_message] + messages
+        if timeout is None:
+            timeout = self._config.request_timeout
             
         target_n = kwargs.pop("n", 1)
         max_request_n = self._config.max_request_n or target_n
@@ -107,14 +102,26 @@ class LLM:
                     request_params["extra_body"] = self._config.extra_body
                 request_params.update(kwargs)
                     
-                response = self._get_client().chat.completions.create(**request_params)
+                retryer = Retrying(
+                    wait=wait_random_exponential(multiplier=1, max=self._config.retry_max_wait),
+                    stop=stop_after_attempt(self._config.retry_attempts),
+                    # Retry on recoverable errors (including BadRequestError for provider-specific issues like "user location not supported")
+                    # NOT on AuthenticationError (wrong API key won't fix itself)
+                    retry=retry_if_exception_type((RateLimitError, APITimeoutError, APIConnectionError, InternalServerError, BadRequestError, EmptyResponseError)),
+                    reraise=True,
+                )
+                response = None
+                for attempt in retryer:
+                    with attempt:
+                        response = self._get_client().chat.completions.create(**request_params)
+                        if not response.choices:
+                            raise EmptyResponseError(f"No response from the model: {response}")
+                        for choice in response.choices:
+                            if choice.message.content is None or choice.message.content.strip() == "":
+                                raise EmptyResponseError(f"Model returned empty content (possibly filtered): {response}")
+
                 if not response.choices:
                     raise EmptyResponseError(f"No response from the model: {response}")
-                
-                # Check if any choice has None or empty content
-                for choice in response.choices:
-                    if choice.message.content is None or choice.message.content.strip() == "":
-                        raise EmptyResponseError(f"Model returned empty content (possibly filtered): {response}")
                 
                 all_choices.extend([choice.message for choice in response.choices])
                 
