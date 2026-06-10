@@ -222,3 +222,77 @@ class LocalValueIndex:
             "column_name": lookup_column_name,
             "values": top_values,
         }
+
+    def retrieve_candidates_for_column(
+        self,
+        keywords: List[str],
+        query_embeddings: List[List[float]],
+        table_name: str,
+        column_name: str,
+        n_results: int,
+        lower_meta_data: bool,
+    ) -> Dict[str, Any]:
+        lookup_table_name = table_name.lower() if lower_meta_data else table_name
+        lookup_column_name = column_name.lower() if lower_meta_data else column_name
+
+        if not query_embeddings:
+            return {
+                "table_name": lookup_table_name,
+                "column_name": lookup_column_name,
+                "candidates": [],
+            }
+
+        try:
+            loaded_column = self._load_column(lookup_table_name, lookup_column_name)
+        except KeyError:
+            return {
+                "table_name": lookup_table_name,
+                "column_name": lookup_column_name,
+                "candidates": [],
+            }
+
+        column_embeddings = loaded_column.embeddings
+        if column_embeddings.shape[0] == 0:
+            return {
+                "table_name": lookup_table_name,
+                "column_name": lookup_column_name,
+                "candidates": [],
+            }
+
+        query_array = np.asarray(query_embeddings, dtype=np.float32)
+        query_tensor = torch.as_tensor(query_array, dtype=torch.float32, device=self._device)
+        if query_tensor.ndim == 1:
+            query_tensor = query_tensor.unsqueeze(0)
+        query_tensor = torch.nn.functional.normalize(query_tensor, p=2, dim=1, eps=1e-12)
+
+        top_k = min(n_results, column_embeddings.shape[0])
+        similarities = query_tensor @ column_embeddings.T
+        top_similarities, top_indices = torch.topk(similarities, k=top_k, dim=1)
+
+        similarity_rows = top_similarities.detach().cpu().tolist()
+        index_rows = top_indices.detach().cpu().tolist()
+
+        candidates = []
+        for keyword_idx, (similarity_row, index_row) in enumerate(zip(similarity_rows, index_rows)):
+            keyword = keywords[keyword_idx] if keyword_idx < len(keywords) else ""
+            for similarity, index in zip(similarity_row, index_row):
+                value_similarity = float(similarity)
+                value_distance = 1.0 - value_similarity
+                candidates.append(
+                    {
+                        "keyword": keyword,
+                        "keyword_idx": keyword_idx,
+                        "table_name": lookup_table_name,
+                        "column_name": lookup_column_name,
+                        "value": loaded_column.documents[index],
+                        "value_distance": value_distance,
+                        "value_similarity": value_similarity,
+                        "final_score": value_similarity,
+                    }
+                )
+
+        return {
+            "table_name": lookup_table_name,
+            "column_name": lookup_column_name,
+            "candidates": candidates,
+        }

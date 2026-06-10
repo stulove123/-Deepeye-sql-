@@ -1,7 +1,18 @@
 from pathlib import Path
 from tqdm import tqdm
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from .utils import extract_keywords, retrieve_values_for_one_column, embed_keywords
+from .utils import (
+    embed_keywords,
+    embed_schema_contexts,
+    extract_keywords,
+    filter_retrieval_keywords,
+    group_selected_candidates_by_column,
+    rerank_candidates_with_context,
+    retrieve_candidates_for_one_column,
+    retrieve_values_for_one_column,
+    select_candidates_per_column,
+    select_global_candidates_with_quota,
+)
 from app.dataset import BaseDataset, load_dataset, save_dataset, DataItem
 from app.llm import LLM
 from app.vector_db import (
@@ -227,6 +238,53 @@ class ValueRetrievalRunner:
                 )
                 time.sleep(sleep_seconds)
 
+    def _retrieve_candidates_for_column(
+        self,
+        keywords: List[str],
+        query_embeddings: List[List[float]],
+        collection_or_index: Collection | LocalValueIndex,
+        db_id: str,
+        table_name: str,
+        column_name: str,
+    ) -> Dict[str, Any]:
+        candidate_n_results = self._stage_config.candidate_n_results or self._stage_config.n_results
+        if self._retrieval_backend == "local_index":
+            return collection_or_index.retrieve_candidates_for_column(
+                keywords=keywords,
+                query_embeddings=query_embeddings,
+                table_name=table_name,
+                column_name=column_name,
+                n_results=candidate_n_results,
+                lower_meta_data=self._vector_database_config.lower_meta_data,
+            )
+
+        for attempt_idx in range(MAX_CHROMA_POOL_TIMEOUT_RETRIES):
+            try:
+                return retrieve_candidates_for_one_column(
+                    keywords,
+                    query_embeddings,
+                    collection_or_index,
+                    table_name,
+                    column_name,
+                    candidate_n_results,
+                    self._vector_database_config.lower_meta_data,
+                )
+            except Exception as exc:
+                error_message = str(exc).lower()
+                is_pool_timeout = "pool timed out" in error_message and "open connection" in error_message
+                is_segment_error = "failed to get segments" in error_message
+                if (not is_pool_timeout and not is_segment_error) or attempt_idx == MAX_CHROMA_POOL_TIMEOUT_RETRIES - 1:
+                    raise
+
+                sleep_seconds = min(2 ** attempt_idx, 8)
+                logger.warning(
+                    "Retrying Chroma candidate query for "
+                    f"{db_id}.{table_name}.{column_name} "
+                    f"(attempt {attempt_idx + 1}/{MAX_CHROMA_POOL_TIMEOUT_RETRIES}); "
+                    f"reason={str(exc)}; retrying in {sleep_seconds}s"
+                )
+                time.sleep(sleep_seconds)
+
     def _extract_keywords(self, data_item: DataItem) -> tuple[List[str], Dict[str, int]]:
         return extract_keywords(
             data_item.question,
@@ -262,6 +320,11 @@ class ValueRetrievalRunner:
         # 1. LLM Keyword Extraction
         keyword_start_time = time.time()
         keywords, token_usage = self._extract_keywords(data_item)
+        keywords = filter_retrieval_keywords(
+            keywords,
+            drop_stopwords=self._stage_config.drop_stopwords,
+            min_keyword_length=self._stage_config.min_keyword_length,
+        )
         data_item.question_keywords = keywords
         data_item.value_retrieval_llm_cost = token_usage
         logger.info(
@@ -317,7 +380,104 @@ class ValueRetrievalRunner:
                 f"with query_parallel_per_sample={self._query_parallel_per_sample}"
             )
 
-        if column_tasks:
+        use_candidate_pipeline = (
+            self._stage_config.enable_context_aware_rerank
+            or self._stage_config.enable_global_selection
+        )
+
+        if column_tasks and use_candidate_pipeline:
+            all_candidates = []
+            progress_markers = self._get_progress_markers(total_column_tasks)
+            completed_columns = 0
+            with ThreadPoolExecutor(max_workers=min(total_column_tasks, self._query_parallel_per_sample)) as col_executor:
+                future_to_col = {
+                    col_executor.submit(
+                        self._retrieve_candidates_for_column,
+                        keywords,
+                        query_embeddings,
+                        retrieval_resource,
+                        data_item.database_id,
+                        t_name,
+                        c_name,
+                    ): (t_name, c_name) for t_name, c_name in column_tasks
+                }
+                for future in as_completed(future_to_col):
+                    result = future.result()
+                    all_candidates.extend(result["candidates"])
+                    completed_columns += 1
+                    if completed_columns in progress_markers:
+                        logger.info(
+                            f"{item_log_prefix} candidate retrieval progress "
+                            f"{completed_columns}/{total_column_tasks} "
+                            f"({time.time() - retrieval_start_time:.2f}s elapsed)"
+                        )
+
+            if self._stage_config.enable_context_aware_rerank and all_candidates:
+                context_start_time = time.time()
+                table_context_embeddings, column_context_embeddings = embed_schema_contexts(
+                    data_item.database_schema,
+                    column_tasks,
+                    self._embedding_function,
+                    batch_size=self._vector_database_config.batch_size,
+                    lower_meta_data=self._vector_database_config.lower_meta_data,
+                )
+                all_candidates = rerank_candidates_with_context(
+                    all_candidates,
+                    query_embeddings,
+                    table_context_embeddings,
+                    column_context_embeddings,
+                    value_similarity_weight=self._stage_config.value_similarity_weight,
+                    column_similarity_weight=self._stage_config.column_similarity_weight,
+                    table_similarity_weight=self._stage_config.table_similarity_weight,
+                    context_similarity_threshold=self._stage_config.context_similarity_threshold,
+                    context_similarity_slope=self._stage_config.context_similarity_slope,
+                    value_rescue_threshold=self._stage_config.value_rescue_threshold,
+                    value_rescue_slope=self._stage_config.value_rescue_slope,
+                    context_penalty_floor=self._stage_config.context_penalty_floor,
+                )
+                logger.info(
+                    f"{item_log_prefix} context-aware reranked {len(all_candidates)} candidates "
+                    f"in {time.time() - context_start_time:.2f}s"
+                )
+
+            max_values_per_column = self._stage_config.max_values_per_column_after_global or self._stage_config.n_results
+            if self._stage_config.enable_global_selection:
+                selected_candidates = select_global_candidates_with_quota(
+                    all_candidates,
+                    global_top_k_per_keyword=self._stage_config.global_top_k_per_keyword,
+                    per_column_quota_per_keyword=self._stage_config.per_column_quota_per_keyword,
+                    max_values_per_column=max_values_per_column,
+                    score_threshold=self._stage_config.global_score_threshold,
+                )
+            else:
+                selected_candidates = select_candidates_per_column(
+                    all_candidates,
+                    max_values_per_column=max_values_per_column,
+                    score_threshold=self._stage_config.global_score_threshold,
+                )
+
+            grouped_candidates = group_selected_candidates_by_column(
+                selected_candidates,
+                max_values_per_column=max_values_per_column,
+            )
+            for table_name, columns in grouped_candidates.items():
+                original_table_name = map_lower_table_name_to_original_table_name(table_name, data_item.database_schema)
+                if original_table_name is None:
+                    continue
+                for column_name, values in columns.items():
+                    original_column_name = map_lower_column_name_to_original_column_name(
+                        original_table_name,
+                        column_name,
+                        data_item.database_schema,
+                    )
+                    if original_column_name is None:
+                        continue
+                    data_item.retrieved_values[original_table_name][original_column_name] = values
+            logger.info(
+                f"{item_log_prefix} selected {len(selected_candidates)} values from "
+                f"{len(all_candidates)} candidates"
+            )
+        elif column_tasks:
             progress_markers = self._get_progress_markers(total_column_tasks)
             completed_columns = 0
             with ThreadPoolExecutor(max_workers=min(total_column_tasks, self._query_parallel_per_sample)) as col_executor:

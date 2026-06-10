@@ -97,10 +97,27 @@ class VectorDatabaseConfig(BaseModel):
 class ValueRetrievalConfig(BaseModel):
     llm: LLMConfig = Field(..., description="The llm config, used to extract keywords")
     n_results: int = Field(default=5, description="The number of results to retrieve")
+    candidate_n_results: Optional[int] = Field(default=None, ge=1, description="Initial per-column candidate count before reranking; defaults to n_results")
     n_parallel: int = Field(default=16, description="The number of samples to process in parallel")
     query_parallel_per_sample: int = Field(default=4, ge=1, description="Maximum concurrent Chroma column queries within a single sample")
     backend: Literal["chroma", "local_index"] = Field(default="chroma", description="The retrieval backend to use for value retrieval")
     local_index_device: str = Field(default="auto", description="Execution device for the local index backend, e.g. auto, cpu, cuda, cuda:0, cuda:1")
+    enable_context_aware_rerank: bool = Field(default=False, description="Whether to rerank value candidates using table/column context similarity")
+    enable_global_selection: bool = Field(default=False, description="Whether to select retrieved values from a global candidate pool with diversity quotas")
+    value_similarity_weight: float = Field(default=1.0, ge=0, description="Weight for value-to-keyword similarity in context-aware scoring")
+    column_similarity_weight: float = Field(default=0.35, ge=0, description="Weight for column-context similarity in context-aware scoring")
+    table_similarity_weight: float = Field(default=0.15, ge=0, description="Weight for table-context similarity in context-aware scoring")
+    context_similarity_threshold: float = Field(default=0.35, description="Context similarity threshold used by the non-linear context gate")
+    context_similarity_slope: float = Field(default=10.0, gt=0, description="Slope for the non-linear context gate")
+    value_rescue_threshold: float = Field(default=0.92, description="Value similarity threshold above which context penalties are reduced")
+    value_rescue_slope: float = Field(default=20.0, gt=0, description="Slope for the high-value rescue gate")
+    context_penalty_floor: float = Field(default=0.35, ge=0, le=1, description="Minimum context multiplier to avoid over-penalizing odd table/column names")
+    global_top_k_per_keyword: int = Field(default=15, ge=1, description="Maximum globally selected values per keyword when global selection is enabled")
+    per_column_quota_per_keyword: int = Field(default=3, ge=1, description="Maximum values one column can contribute for a single keyword")
+    max_values_per_column_after_global: Optional[int] = Field(default=None, ge=1, description="Maximum selected values kept per column after global selection; defaults to n_results")
+    global_score_threshold: float = Field(default=0.0, description="Minimum final score for globally selected candidates")
+    drop_stopwords: bool = Field(default=False, description="Whether to remove common stopwords from value retrieval keywords")
+    min_keyword_length: int = Field(default=1, ge=1, description="Minimum keyword length after stripping")
     save_path: str = Field(default=_path_to_str(WORKSPACE_ROOT / "value_retrieval"), description="The save path of the value retrieval result")
 
 
@@ -264,10 +281,27 @@ class Config:
         value_retrieval_settings = {
             "llm": LLMConfig(**value_retrieval_config.get("llm")),
             "n_results": value_retrieval_config.get("n_results", 5),
+            "candidate_n_results": value_retrieval_config.get("candidate_n_results", None),
             "n_parallel": value_retrieval_config.get("n_parallel", 16),
             "query_parallel_per_sample": value_retrieval_config.get("query_parallel_per_sample", 4),
             "backend": value_retrieval_config.get("backend", "chroma"),
             "local_index_device": value_retrieval_config.get("local_index_device", "auto"),
+            "enable_context_aware_rerank": value_retrieval_config.get("enable_context_aware_rerank", False),
+            "enable_global_selection": value_retrieval_config.get("enable_global_selection", False),
+            "value_similarity_weight": value_retrieval_config.get("value_similarity_weight", 1.0),
+            "column_similarity_weight": value_retrieval_config.get("column_similarity_weight", 0.35),
+            "table_similarity_weight": value_retrieval_config.get("table_similarity_weight", 0.15),
+            "context_similarity_threshold": value_retrieval_config.get("context_similarity_threshold", 0.35),
+            "context_similarity_slope": value_retrieval_config.get("context_similarity_slope", 10.0),
+            "value_rescue_threshold": value_retrieval_config.get("value_rescue_threshold", 0.92),
+            "value_rescue_slope": value_retrieval_config.get("value_rescue_slope", 20.0),
+            "context_penalty_floor": value_retrieval_config.get("context_penalty_floor", 0.35),
+            "global_top_k_per_keyword": value_retrieval_config.get("global_top_k_per_keyword", 15),
+            "per_column_quota_per_keyword": value_retrieval_config.get("per_column_quota_per_keyword", 3),
+            "max_values_per_column_after_global": value_retrieval_config.get("max_values_per_column_after_global", None),
+            "global_score_threshold": value_retrieval_config.get("global_score_threshold", 0.0),
+            "drop_stopwords": value_retrieval_config.get("drop_stopwords", False),
+            "min_keyword_length": value_retrieval_config.get("min_keyword_length", 1),
             "save_path": _path_to_str(value_retrieval_config.get("save_path", WORKSPACE_ROOT / "value_retrieval")),
         }
         

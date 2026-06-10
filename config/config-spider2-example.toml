@@ -40,6 +40,24 @@ n_parallel = 8   # number of samples to process in parallel
 query_parallel_per_sample = 4   # concurrent Chroma column queries allowed within one sample
 backend = "local_index"   # use "chroma" to keep the original backend
 local_index_device = "auto"   # auto | cpu | cuda | cuda:0 | cuda:1
+# Optional first-version enhanced retrieval. Disabled by default to preserve paper reproduction behavior.
+# candidate_n_results = 20   # initial per-column candidates before reranking; defaults to n_results
+# enable_context_aware_rerank = true
+# enable_global_selection = true
+# value_similarity_weight = 1.0
+# column_similarity_weight = 0.35
+# table_similarity_weight = 0.15
+# context_similarity_threshold = 0.35
+# context_similarity_slope = 10.0
+# value_rescue_threshold = 0.92
+# value_rescue_slope = 20.0
+# context_penalty_floor = 0.35
+# global_top_k_per_keyword = 15
+# per_column_quota_per_keyword = 3
+# max_values_per_column_after_global = 5
+# global_score_threshold = 0.0
+# drop_stopwords = false
+# min_keyword_length = 1
 save_path = "workspace/value_retrieval/spider2/lite.snapshot"
 
 [value_retrieval.llm]
